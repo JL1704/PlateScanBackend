@@ -6,6 +6,14 @@ import numpy as np
 import os
 import re
 import easyocr
+import sys
+
+# ------------------ Agregar yolov5 al path ------------------
+sys.path.append('yolov5')  # Asegúrate de haber clonado este repo en el mismo nivel que main.py
+
+from models.common import DetectMultiBackend
+from utils.general import non_max_suppression, scale_coords
+from utils.torch_utils import select_device
 
 # ------------------ Cargar modelo YOLOv5 ------------------
 
@@ -13,11 +21,12 @@ yolo_model_path = 'models/best.pt'
 if not os.path.exists(yolo_model_path):
     raise FileNotFoundError(f"Modelo YOLOv5 no encontrado en: {yolo_model_path}")
 
-model = torch.hub.load('ultralytics/yolov5', 'custom', path=yolo_model_path, force_reload=True)
-model.cpu()
+device = select_device('cpu')  # Puedes usar 'cuda:0' si Render lo soportara
+model = DetectMultiBackend(yolo_model_path, device=device)
+stride, names, pt = model.stride, model.names, model.pt
 
 # Inicializar OCR
-reader = easyocr.Reader(['es'], gpu=torch.cuda.is_available())
+reader = easyocr.Reader(['es'], gpu=False)
 
 # Inicializar FastAPI
 app = FastAPI()
@@ -32,16 +41,26 @@ async def detect_plate(image: UploadFile = File(...)):
         npimg = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
 
-        # Detección con YOLOv5
-        results = model(img)
-        detections = results.xyxy[0]
+        # Preprocesamiento
+        img_resized = cv2.resize(img, (640, 640))
+        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        img_tensor = torch.from_numpy(img_rgb).permute(2, 0, 1).float()
+        img_tensor /= 255.0
+        if img_tensor.ndimension() == 3:
+            img_tensor = img_tensor.unsqueeze(0)
 
-        if detections.shape[0] == 0:
+        img_tensor = img_tensor.to(device)
+
+        # Inferencia
+        pred = model(img_tensor)
+        pred = non_max_suppression(pred, conf_thres=0.25, iou_thres=0.45)[0]
+
+        if pred is None or len(pred) == 0:
             return JSONResponse(content={"plate": "", "success": False, "message": "No se detectó ninguna placa con YOLO"})
 
-        # Tomar la detección con mayor confianza
-        box = detections[0].tolist()
-        x1, y1, x2, y2 = map(int, box[:4])
+        # Coordenadas reales
+        pred = scale_coords(img_tensor.shape[2:], pred[:, :4], img.shape).round()
+        x1, y1, x2, y2 = map(int, pred[0][:4])
         cropped_img = img[y1:y2, x1:x2]
 
         # OCR con EasyOCR
