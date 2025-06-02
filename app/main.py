@@ -1,70 +1,65 @@
 import os
-import sys
 from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from PIL import Image
-import torch
-import numpy as np
 from io import BytesIO
+import numpy as np
+import onnxruntime as ort
 
-# Añadir yolov5 al path
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(current_dir, ".."))
-yolov5_path = os.path.join(project_root, "yolov5")
-sys.path.insert(0, yolov5_path)
-
-# Importar desde yolov5 explícitamente
-from yolov5.models.common import DetectMultiBackend
-from yolov5.utils.general import non_max_suppression
-from yolov5.utils.torch_utils import select_device
-
+# Inicializar FastAPI
 app = FastAPI()
 
-# CORS
+# Habilitar CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Cambiar esto por seguridad en producción
+    allow_origins=["*"],  # En producción restringe esto
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Inicializar modelo
-device = select_device('')
-model_path = os.path.join(current_dir, "models/best.pt")
-model = DetectMultiBackend(model_path, device=device, dnn=False)
-model.eval()
+# Cargar el modelo ONNX
+model_path = os.path.join(os.path.dirname(__file__), "models", "best.onnx")
+session = ort.InferenceSession(model_path)
+
+# Configurar nombre de input dinámicamente
+input_name = session.get_inputs()[0].name
 
 @app.post("/detect")
 async def detect_plate(file: UploadFile = File(...)):
     try:
-        # Leer imagen
+        # Leer la imagen
         contents = await file.read()
         image = Image.open(BytesIO(contents)).convert("RGB")
         img = np.array(image)
 
         # Preprocesar imagen
-        img_resized = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).float().to(device)
-        img_resized /= 255.0
+        img_resized = np.array(Image.fromarray(img).resize((640, 640)))  # Asume que el modelo espera 640x640
+        img_input = img_resized.transpose(2, 0, 1).astype(np.float32) / 255.0
+        img_input = np.expand_dims(img_input, axis=0)
 
-        # Inferencia
-        pred = model(img_resized, augment=False)
-        pred = non_max_suppression(pred, conf_thres=0.25, iou_thres=0.45)[0]
+        # Inferencia ONNX
+        outputs = session.run(None, {input_name: img_input})
 
-        if pred is None or len(pred) == 0:
+        # Post-procesamiento básico (ajustar según tu modelo)
+        pred = outputs[0][0]
+        boxes = []
+        for det in pred:
+            conf = det[4]
+            if conf > 0.25:
+                x1, y1, x2, y2 = det[0:4]
+                class_id = int(det[5])
+                boxes.append({
+                    "box": [float(x1), float(y1), float(x2), float(y2)],
+                    "confidence": float(conf),
+                    "class": class_id
+                })
+
+        if not boxes:
             return JSONResponse(content={"message": "No se detectó ninguna placa"}, status_code=200)
 
-        box = pred[0][:4].tolist()
-        confidence = float(pred[0][4])
-        class_id = int(pred[0][5])
-
-        return {
-            "box": box,
-            "confidence": confidence,
-            "class": class_id,
-        }
+        return {"detections": boxes}
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
-

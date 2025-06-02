@@ -1,6 +1,7 @@
 # Servidor FastAPI
 fastapi
 uvicorn[standard]
+onnxruntime
 
 # PyTorch (solo CPU en Render Free tier)
 torch==2.0.1+cpu
