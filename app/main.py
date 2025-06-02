@@ -1,81 +1,70 @@
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
-import torch
-import cv2
-import numpy as np
 import os
-import re
-import easyocr
 import sys
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image
+import torch
+import numpy as np
+from io import BytesIO
 
-# ------------------ Agregar yolov5 al path ------------------
+# Añadir yolov5 al path
 current_dir = os.path.dirname(os.path.abspath(__file__))
-yolov5_path = os.path.join(current_dir, "../yolov5")
-sys.path.append(yolov5_path)
+project_root = os.path.abspath(os.path.join(current_dir, ".."))
+yolov5_path = os.path.join(project_root, "yolov5")
+sys.path.insert(0, yolov5_path)
 
-from models.common import DetectMultiBackend
-from utils.general import non_max_suppression, scale_coords
-from utils.torch_utils import select_device
+# Importar desde yolov5 explícitamente
+from yolov5.models.common import DetectMultiBackend
+from yolov5.utils.general import non_max_suppression
+from yolov5.utils.torch_utils import select_device
 
-# ------------------ Configuración del modelo ------------------
-yolo_model_path = os.path.join(current_dir, "models/best.pt")
-if not os.path.exists(yolo_model_path):
-    raise FileNotFoundError(f"Modelo YOLOv5 no encontrado en: {yolo_model_path}")
-
-device = select_device('cpu')  # Render no soporta GPU
-model = DetectMultiBackend(yolo_model_path, device=device)
-stride, names, pt = model.stride, model.names, model.pt
-
-# Inicializar OCR
-reader = easyocr.Reader(['es'], gpu=False)
-
-# Inicializar FastAPI
 app = FastAPI()
 
-# ------------------ Endpoint de detección ------------------
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Cambiar esto por seguridad en producción
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Inicializar modelo
+device = select_device('')
+model_path = os.path.join(current_dir, "models/best.pt")
+model = DetectMultiBackend(model_path, device=device, dnn=False)
+model.eval()
+
 @app.post("/detect")
-async def detect_plate(image: UploadFile = File(...)):
+async def detect_plate(file: UploadFile = File(...)):
     try:
         # Leer imagen
-        image_bytes = await image.read()
-        npimg = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+        contents = await file.read()
+        image = Image.open(BytesIO(contents)).convert("RGB")
+        img = np.array(image)
 
-        # Preprocesamiento
-        img_resized = cv2.resize(img, (640, 640))
-        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-        img_tensor = torch.from_numpy(img_rgb).permute(2, 0, 1).float() / 255.0
-        if img_tensor.ndimension() == 3:
-            img_tensor = img_tensor.unsqueeze(0)
-        img_tensor = img_tensor.to(device)
+        # Preprocesar imagen
+        img_resized = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).float().to(device)
+        img_resized /= 255.0
 
         # Inferencia
-        pred = model(img_tensor)
+        pred = model(img_resized, augment=False)
         pred = non_max_suppression(pred, conf_thres=0.25, iou_thres=0.45)[0]
 
         if pred is None or len(pred) == 0:
-            return JSONResponse(content={"plate": "", "success": False, "message": "No se detectó ninguna placa con YOLO"})
+            return JSONResponse(content={"message": "No se detectó ninguna placa"}, status_code=200)
 
-        # Extraer coordenadas
-        pred = scale_coords(img_tensor.shape[2:], pred[:, :4], img.shape).round()
-        x1, y1, x2, y2 = map(int, pred[0][:4])
-        cropped_img = img[y1:y2, x1:x2]
+        box = pred[0][:4].tolist()
+        confidence = float(pred[0][4])
+        class_id = int(pred[0][5])
 
-        # OCR
-        ocr_results = reader.readtext(cropped_img)
-
-        # Buscar formato tipo ABC-123-X
-        plate_pattern = re.compile(r'[A-Z]{3}-\d{3}-[A-Z]')
-        encontrados = []
-
-        for (_, texto, prob) in ocr_results:
-            texto_filtrado = texto.strip().upper().replace(" ", "")
-            if plate_pattern.match(texto_filtrado):
-                encontrados.append((texto_filtrado, prob))
-
-        plate = sorted(encontrados, key=lambda x: x[1], reverse=True)[0][0] if encontrados else ""
-
-        return JSONResponse(content={"plate": plate, "success": True})
+        return {
+            "box": box,
+            "confidence": confidence,
+            "class": class_id,
+        }
 
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
