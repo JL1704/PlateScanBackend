@@ -2,6 +2,7 @@
 fastapi
 uvicorn[standard]
 onnxruntime
+python-multipart
 
 # PyTorch (solo CPU en Render Free tier)
 torch==2.0.1+cpu
