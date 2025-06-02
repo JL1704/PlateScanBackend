@@ -1,0 +1,5 @@
+torch~=2.7.0
+opencv-python~=4.11.0.86
+numpy~=2.2.6
+easyocr~=1.7.2
+fastapi~=0.115.12
