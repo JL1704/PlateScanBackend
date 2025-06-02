@@ -9,7 +9,7 @@ import easyocr
 
 # ------------------ Cargar modelo YOLOv5 ------------------
 
-yolo_model_path = '../models/best.pt'
+yolo_model_path = 'models/best.pt'
 if not os.path.exists(yolo_model_path):
     raise FileNotFoundError(f"Modelo YOLOv5 no encontrado en: {yolo_model_path}")
 
