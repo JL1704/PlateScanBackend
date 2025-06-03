@@ -24,10 +24,10 @@ session = ort.InferenceSession(model_path)
 input_name = session.get_inputs()[0].name
 
 @app.post("/detect")
-async def detect_plate(file: UploadFile = File(...)):
+async def detect_plate(image: UploadFile = File(...)):
     try:
         # Leer imagen
-        contents = await file.read()
+        contents = await image.read()
         image = Image.open(BytesIO(contents)).convert("RGB")
         img = np.array(image)
 
